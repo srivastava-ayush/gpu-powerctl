@@ -1,4 +1,5 @@
-# gpu-powerctl
+# gpu-powerctl 
+made by Ayush (goat)
 
 **Manual NVIDIA discrete-GPU power control for Linux laptops.** `gpu-powerctl` provides `status`, `off`, and `on` commands. The first release is conservative: it supports one detected NVIDIA PCI display controller and refuses to guess if it finds more than one.
 
