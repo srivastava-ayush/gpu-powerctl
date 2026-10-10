@@ -1,0 +1,18 @@
+# Replace YOUR_GITHUB_USERNAME after publishing the upstream repository and tag.
+pkgname=gpu-powerctl
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Manual NVIDIA discrete GPU power control for Linux laptops'
+arch=('any')
+url='https://github.com/YOUR_GITHUB_USERNAME/gpu-powerctl'
+license=('MIT')
+depends=('bash' 'coreutils' 'psmisc')
+source=("git+https://github.com/YOUR_GITHUB_USERNAME/gpu-powerctl.git#tag=v${pkgver}")
+sha256sums=('SKIP')
+
+package() {
+  install -Dm755 "$srcdir/$pkgname/bin/gpu-powerctl" "$pkgdir/usr/bin/gpu-powerctl"
+  install -Dm644 "$srcdir/$pkgname/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 "$srcdir/$pkgname/CHANGELOG.md" "$pkgdir/usr/share/doc/$pkgname/CHANGELOG.md"
+  install -Dm644 "$srcdir/$pkgname/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

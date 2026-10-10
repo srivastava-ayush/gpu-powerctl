@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# gpu-powerctl: conservative manual NVIDIA dGPU power control for Linux.
+set -Eeuo pipefail
+
+readonly VERSION='0.1.0'
+readonly SYS_PCI='/sys/bus/pci/devices'
+
+log()  { printf 'gpu-powerctl: %s\n' "$*" >&2; }
+die()  { log "error: $*"; exit 1; }
+need_root() { (( EUID == 0 )) || die "this action needs root; try: sudo gpu-powerctl $1"; }
+
+# Discover exactly one NVIDIA PCI display controller. Ambiguous systems fail closed.
+discover_gpu() {
+  local path vendor class
+  local -a found=()
+  shopt -s nullglob
+  for path in "$SYS_PCI"/*; do
+    [[ -r "$path/vendor" && -r "$path/class" ]] || continue
+    IFS= read -r vendor < "$path/vendor" || true
+    IFS= read -r class < "$path/class" || true
+    [[ "$vendor" == '0x10de' ]] || continue
+    # PCI base class 0x03 = display controller (VGA or 3D controller).
+    [[ "$class" == 0x03* ]] || continue
+    found+=("${path##*/}")
+  done
+  shopt -u nullglob
+  ((${#found[@]} > 0)) || die 'no NVIDIA PCI display controller found.'
+  ((${#found[@]} == 1)) || die 'multiple NVIDIA display controllers found; refusing to guess which one to control.'
+  printf '%s\n' "${found[0]}"
+}
+
+# Return the sibling NVIDIA audio function if present. Never unbind unrelated functions.
+discover_audio() {
+  local gpu="$1" base path vendor class bdf
+  base="${gpu%.*}"
+  local -a found=()
+  shopt -s nullglob
+  for path in "$SYS_PCI"/"$base".*; do
+    bdf="${path##*/}"
+    [[ "$bdf" != "$gpu" && -r "$path/vendor" && -r "$path/class" ]] || continue
+    IFS= read -r vendor < "$path/vendor" || true
+    IFS= read -r class < "$path/class" || true
+    [[ "$vendor" == '0x10de' && "$class" == 0x0403* ]] || continue
+    found+=("$bdf")
+  done
+  shopt -u nullglob
+  ((${#found[@]} <= 1)) || die "multiple NVIDIA audio functions found beside $gpu; refusing to guess."
+  printf '%s\n' "${found[0]-}"
+}
+
+bound_driver() {
+  local bdf="$1" link
+  link="$SYS_PCI/$bdf/driver"
+  if [[ -L "$link" ]]; then basename "$(readlink -f "$link")"; else printf '%s\n' '-'; fi
+}
+read_attr() {
+  local file="$1" value='unavailable'
+  if [[ -r "$file" ]]; then IFS= read -r value < "$file" || true; fi
+  printf '%s\n' "$value"
+}
+
+show_device() {
+  local label="$1" bdf="$2" path="$SYS_PCI/$2"
+  [[ -n "$bdf" ]] || { printf '%s: not detected\n' "$label"; return; }
+  printf '%s (%s): driver=%s, control=%s, runtime_status=%s\n' \
+    "$label" "$bdf" "$(bound_driver "$bdf")" \
+    "$(read_attr "$path/power/control")" \
+    "$(read_attr "$path/power/runtime_status")"
+}
+
+# Check known NVIDIA device nodes before detaching. fuser is a required dependency.
+check_gpu_idle() {
+  local node
+  local -a nodes=(/dev/nvidia[0-9]* /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-modeset)
+  for node in "${nodes[@]}"; do
+    [[ -e "$node" ]] || continue
+    if fuser -s -- "$node"; then
+      die "device node $node is in use; close GPU-accelerated applications and retry. No devices were intentionally detached."
+    fi
+  done
+}
+
+write_attr() {
+  local value="$1" file="$2"
+  [[ -w "$file" ]] || die "cannot write $file"
+  printf '%s\n' "$value" > "$file" || die "failed writing $file"
+}
+
+unbind_device() {
+  local bdf="$1" driver
+  [[ -n "$bdf" ]] || return 0
+  driver="$(bound_driver "$bdf")"
+  [[ "$driver" != '-' ]] || return 0
+  [[ -w "/sys/bus/pci/drivers/$driver/unbind" ]] || { log "driver $driver has no writable unbind interface for $bdf"; return 1; }
+  printf '%s\n' "$bdf" > "/sys/bus/pci/drivers/$driver/unbind" || { log "failed to unbind $bdf from $driver"; return 1; }
+}
+
+bind_device() {
+  local bdf="$1" path="$SYS_PCI/$1"
+  [[ -n "$bdf" ]] || return 0
+  [[ -e "$path" ]] || die "PCI device $bdf disappeared"
+  if [[ "$(bound_driver "$bdf")" != '-' ]]; then return 0; fi
+  # drivers_probe asks the kernel to match the device to its normal driver.
+  [[ -w /sys/bus/pci/drivers_probe ]] || die 'kernel drivers_probe interface is unavailable'
+  printf '%s\n' "$bdf" > /sys/bus/pci/drivers_probe || die "kernel failed to reprobe $bdf"
+  [[ "$(bound_driver "$bdf")" != '-' ]] || die "no driver bound to $bdf after reprobe; check kernel logs"
+}
+
+status() {
+  local gpu audio
+  gpu="$(discover_gpu)"
+  audio="$(discover_audio "$gpu")"
+  show_device 'NVIDIA GPU' "$gpu"
+  show_device 'NVIDIA audio' "$audio"
+  if [[ "$(bound_driver "$gpu")" == '-' ]]; then
+    printf 'Availability: detached from its driver\n'
+  else
+    printf 'Availability: driver-bound (not proof that applications can initialize it)\n'
+  fi
+}
+
+off() {
+  local gpu audio path
+  need_root off
+  gpu="$(discover_gpu)"
+  audio="$(discover_audio "$gpu")"
+  path="$SYS_PCI/$gpu"
+  [[ -e "$path/power/control" ]] || die "runtime power management interface missing for $gpu"
+  check_gpu_idle
+  log "target GPU: $gpu; sibling NVIDIA audio: ${audio:-none}"
+  # Detach audio first so it cannot keep the GPU function busy.
+  if ! unbind_device "$audio"; then
+    die 'could not detach the NVIDIA audio function; GPU was not intentionally detached.'
+  fi
+  if ! unbind_device "$gpu"; then
+    log 'GPU unbind failed; attempting to restore the audio function.'
+    bind_device "$audio" || true
+    exit 1
+  fi
+  # Runtime PM 'auto' permits the kernel/driver to suspend the PCI device.
+  if ! printf 'auto\n' > "$path/power/control"; then
+    log 'could not enable runtime PM for GPU; attempting to restore devices.'
+    printf 'on\n' > "$path/power/control" 2>/dev/null || true
+    bind_device "$gpu" || true
+    bind_device "$audio" || true
+    die 'failed to configure GPU runtime power management.'
+  fi
+  if [[ -n "$audio" ]] && ! printf 'auto\n' > "$SYS_PCI/$audio/power/control"; then
+    log 'could not enable runtime PM for audio; attempting to restore devices.'
+    printf 'on\n' > "$path/power/control" 2>/dev/null || true
+    printf 'on\n' > "$SYS_PCI/$audio/power/control" 2>/dev/null || true
+    bind_device "$gpu" || true
+    bind_device "$audio" || true
+    die 'failed to configure audio runtime power management.'
+  fi
+  local i state
+  for i in {1..10}; do
+    state="$(read_attr "$path/power/runtime_status")"
+    [[ "$state" == suspended ]] && break
+    sleep 1
+  done
+  show_device 'NVIDIA GPU' "$gpu"
+  [[ -n "$audio" ]] && show_device 'NVIDIA audio' "$audio"
+  if [[ "$state" != suspended ]]; then
+    log "warning: GPU did not report suspended within 10 seconds (state: $state). It remains unbound; inspect kernel logs and hardware support."
+    exit 2
+  fi
+  log 'GPU reports runtime_status=suspended. This does not by itself prove zero physical power draw.'
+}
+
+on() {
+  local gpu audio path
+  need_root on
+  gpu="$(discover_gpu)"
+  audio="$(discover_audio "$gpu")"
+  path="$SYS_PCI/$gpu"
+  # Force runtime resume before asking the kernel to bind the driver.
+  write_attr on "$path/power/control"
+  [[ -n "$audio" ]] && write_attr on "$SYS_PCI/$audio/power/control"
+  bind_device "$gpu"
+  bind_device "$audio"
+  show_device 'NVIDIA GPU' "$gpu"
+  [[ -n "$audio" ]] && show_device 'NVIDIA audio' "$audio"
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    if ! nvidia-smi -L; then log 'warning: driver was rebound, but nvidia-smi could not initialize the GPU.'; fi
+  else
+    log 'nvidia-smi not found; driver binding is shown above, but NVML was not checked.'
+  fi
+}
+
+usage() {
+  cat <<USAGE
+Usage: gpu-powerctl <command>
+
+Commands:
+  status  Show detected NVIDIA GPU and sibling audio power/binding state (no root required)
+  off     Check known NVIDIA device nodes, unbind GPU/audio, enable runtime PM, wait for suspend (root required)
+  on      Enable device power, ask the kernel to rebind drivers, and verify (root required)
+  version Show version
+  help    Show this help
+
+This release supports exactly one detected NVIDIA PCI display controller. It fails closed
+when multiple NVIDIA display controllers are present. It does not guarantee compatibility
+with every laptop, driver, firmware, or PCI topology.
+USAGE
+}
+
+case "${1:-help}" in
+  status) status ;;
+  off) off ;;
+  on) on ;;
+  version) printf 'gpu-powerctl %s\n' "$VERSION" ;;
+  help|-h|--help) usage ;;
+  *) usage >&2; die "unknown command: $1" ;;
+esac
