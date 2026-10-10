@@ -7,21 +7,24 @@ made by Ayush (goat)
 
 ## Why
 
-On the author's(AYUSHHH THE GOAT) ASUS TUF Gaming A15 (FA506ICB; Ryzen 7 4800H; NVIDIA RTX 3050 Mobile; Arch Linux; Hyprland; `nvidia-open`), the documented sequence was:
+On the AYUSHHH THE GOAT's ASUS TUF Gaming A15 (FA506ICB; Ryzen 7 4800H; NVIDIA RTX 3050 Mobile; Arch Linux; Hyprland; `nvidia-open`), the documented sequence was:
 
 1. Unbind NVIDIA audio function `0000:01:00.1` (if present).
 2. Unbind GPU function `0000:01:00.0` from the NVIDIA driver.
 3. Set each function's `power/control` to `auto`.
 4. Verify `power/runtime_status` reports `suspended`.
 
-The author reported that unbinding alone left the GPU active, while unbinding plus runtime PM `auto` reached `suspended` on this system. This is a single-machine result, not a guarantee for other laptops.
+but unbinding alone left the GPU active, while unbinding plus runtime PM `auto` reached `suspended` on this system. This is a single-machine result, not a guarantee for other laptops.
+
+too much pain, my quickshell hovers triggering my dgpu frequently draining battery fast fuckinnn fast 
+
 
 ## Requirements
 
 - Linux with PCI sysfs and runtime power-management interfaces.
 - Bash, `fuser` (Arch package: `psmisc`), and standard core utilities.
-- A loaded NVIDIA driver for normal `off`/`on` operation.
-- Root privileges for `off` and `on`.
+- A loaded NVIDIA driver for normal `off`/`on` operation. (ofc cuhh you need that)
+- Root privileges for `off` and `on`.  (sudooooo) 
 - An NVIDIA PCI display controller; the script currently handles exactly one.
 
 ## Install from a checkout
@@ -53,7 +56,7 @@ gpu-powerctl status
 
 No passwordless sudoers rule is installed. Do not add a broad `NOPASSWD` rule for a script you are actively developing. If you choose to configure one yourself, understand that a root-owned, non-user-writable executable and strict argument handling are essential.
 
-## Safety and limitations
+## Safety and limitations (ye dekhlena bhaiyon)
 
 - The script refuses to act when it detects multiple NVIDIA PCI display controllers. Multi-GPU selection/configuration is not implemented yet.
 - The audio sibling is only considered when it is an NVIDIA PCI audio-class function in the same PCI slot. Other functions, such as USB-C controllers, are intentionally left alone.
